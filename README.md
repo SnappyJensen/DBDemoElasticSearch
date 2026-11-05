@@ -14,3 +14,4 @@ docker compose up -d --wait --wait-timeout 300
 - [Trinvis opsætningsguide](02-OPSAETNINGSGUIDE.md)
 
 Begge tjenester er kun tilgængelige lokalt. Demoen bruger HTTP uden login.
+
