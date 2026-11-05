@@ -1,18 +1,19 @@
 # 2. Opsætningsdemo — Elasticsearch
 
-Denne guide viser installation, konfiguration og integration i et lille projekt. Følg trinene i rækkefølge. Til sidst har du Elasticsearch kørende lokalt og et Node.js-program, der søger i tre produkter.
+Denne guide viser installation og konfiguration af Elasticsearch med Kibana som browserinterface. Følg trinene i rækkefølge. Til sidst kan du søge i tre produkter direkte fra Kibanas Dev Tools Console. Et valgfrit Node.js-eksempel viser også integration i et lille program.
 
-Guiden tager udgangspunkt i **Windows og PowerShell**. Du opretter selv de to filer, `compose.yaml` og `soeg.mjs`, undervejs.
+Guiden tager udgangspunkt i **Windows og PowerShell**. Repositoryet indeholder `compose.yaml`. Filen `soeg.mjs` er kun nødvendig, hvis du vil følge det valgfrie programeksempel.
 
 ## 1. Gør computeren klar
 
 Du skal have:
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) med WSL 2 og Linux-containere. Start programmet, og vent, til Docker er klar.
-- [Node.js](https://nodejs.org/en/download) version 22 eller nyere.
 - En editor, eksempelvis Visual Studio Code.
 
-Docker skal have mindst 4 GB hukommelse til rådighed. Elasticsearch-containeren i denne guide får en grænse på 1 GB, hvilket er nok til vores lille tekstsøgningsdemo. Se [Elastics Docker-vejledning](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-basic).
+Docker skal have mindst 4 GB hukommelse til rådighed. Elasticsearch-containeren får en grænse på 1 GB, og Kibana får 2 GB. Se [Elastics Docker-vejledning](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-basic).
+
+[Node.js](https://nodejs.org/en/download) version 22 eller nyere er kun nødvendig til det valgfrie programeksempel.
 
 Åbn PowerShell i **repositoryets mappe `DBDemoElasticSearch`**, eksempelvis via editorens terminal. Alle følgende kommandoer køres derfra i samme terminal.
 
@@ -21,14 +22,13 @@ Kontrollér værktøjerne:
 ```powershell
 docker version
 docker compose version
-node --version
 ```
 
 **Kontrolpunkt:** `docker version` skal vise både `Client` og `Server`. Hvis `Server` mangler, skal Docker Desktop startes, før du fortsætter.
 
 ## 2. Opret konfigurationen
 
-Opret filen **`compose.yaml` i repositoryets rodmappe**, og indsæt:
+Filen **`compose.yaml` i repositoryets rodmappe** indeholder følgende. Hvis du følger guiden i et nyt, tomt projekt, kan du selv oprette filen med dette indhold:
 
 ```yaml
 services:
@@ -51,6 +51,24 @@ services:
       retries: 12
       start_period: 30s
 
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.6
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      SERVER_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:5601:5601"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+
 volumes:
   esdata:
 ```
@@ -68,10 +86,13 @@ De vigtigste valg:
 | `mem_limit` | Begrænser containerens hukommelse til 1 GB. |
 | `esdata` | Gemmer data i en Docker-volume, så de bevares, når containeren fjernes. |
 | `healthcheck` | Kontrollerer, at Elasticsearch svarer, før opstarten meldes klar. |
+| `kibana` | Browserinterfacet på port 5601. Bruger samme version som Elasticsearch. |
+| `ELASTICSEARCH_HOSTS` | Kibana kontakter Elasticsearch via servicenavnet på Dockers interne netværk. |
+| `depends_on` | Kibana starter, når Elasticsearch har bestået sit sundhedstjek. |
 
 Elasticsearch kan konfigureres gennem miljøvariabler i containeren; se [Elastics konfigurationsvejledning](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-configure).
 
-## 3. Start Elasticsearch
+## 3. Start Elasticsearch og Kibana
 
 Kontrollér først konfigurationen:
 
@@ -82,13 +103,13 @@ docker compose config --quiet
 Ingen output betyder, at konfigurationen er gyldig. Start derefter:
 
 ```powershell
-docker compose up -d --wait --wait-timeout 180
+docker compose up -d --wait --wait-timeout 300
 docker compose ps
 ```
 
-Første gang downloades Elasticsearch-imaget, hvilket kan tage flere minutter. `-d` kører containeren i baggrunden, og `--wait` venter på, at den er klar.
+Første gang downloades begge images, hvilket kan tage flere minutter. `-d` kører containerne i baggrunden, og `--wait` venter på, at de er klar. Hvis Elasticsearch allerede kører fra tidligere trin, starter kommandoen den nye Kibana-tjeneste ved siden af.
 
-**Kontrolpunkt:** Containeren skal stå som `healthy`.
+**Kontrolpunkt:** Begge containere skal stå som `healthy`.
 
 Kontrollér også forbindelsen fra PowerShell:
 
@@ -170,7 +191,60 @@ foreach ($produkt in $produkter) {
 
 `refresh=wait_for` venter på, at ændringen bliver synlig for søgning. Så kan næste trin søge i produkterne med det samme. Se [Elastics forklaring af refresh](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/refresh-parameter).
 
-## 6. Integrér Elasticsearch i et lille Node.js-projekt
+## 6. Brug Elasticsearch i browseren med Kibana
+
+Åbn [Kibana](http://localhost:5601) eller gå direkte til [Dev Tools Console](http://localhost:5601/app/dev_tools#/console).
+
+Det er dit lokale Elastic-interface. Du behøver ikke oprette en Elastic Cloud-konto eller en prøveperiode. Port 9200 er Elasticsearchs API; port 5601 er Kibanas brugerflade. De eksisterende produkter bliver liggende i det samme indeks.
+
+Hvis en velkomstside vises, vælg at udforske egne data, eksempelvis **Explore on my own**. Find derefter **Dev Tools** via menuen eller søgefeltet øverst, og vælg **Console**. Se [Elastics Console-vejledning](https://www.elastic.co/docs/explore-analyze/query-filter/tools/console).
+
+Indsæt følgende i konsollens venstre side:
+
+```http
+GET /produkter/_search
+{
+  "query": {
+    "match_all": {}
+  }
+}
+```
+
+Placér markøren i forespørgslen, og tryk **Ctrl+Enter**, eller klik på afspilningsknappen. JSON-svaret vises til højre. Under `hits.hits` skal du finde de tre produkter.
+
+Prøv derefter en fuldtekstsøgning:
+
+```http
+GET /produkter/_search
+{
+  "query": {
+    "multi_match": {
+      "query": "programmering",
+      "fields": ["navn", "beskrivelse"]
+    }
+  }
+}
+```
+
+**Kontrolpunkt:** `hits.total.value` er `2`, og resultaterne indeholder `Studiecomputer` og `Gamingcomputer`. Ændr søgeordet til `kontoret`, og kør igen; det skal give `Kontorstol`.
+
+Du kan også læse et enkelt dokument:
+
+```http
+GET /produkter/_doc/1
+```
+
+Konsollen sender forespørgslerne til Elasticsearch. Der kræves hverken Node.js eller et separat søgeprogram til denne del af demoen.
+
+### Valgfrit: Se produkterne som en tabel
+
+Åbn **Discover**, og opret en **data view** for indekset `produkter`. Vælg at fortsætte **uden et tidsfelt**, da vores produkter ikke har datoer. Tilføj kolonnerne `navn`, `beskrivelse` og `pris`. Dev Tools bruges til API-forespørgsler; Discover kan bruges til at udforske dokumenterne som en tabel.
+
+### Om kommandoen på Elastics hjemmeside
+
+Elastic tilbyder også `curl -fsSL https://elastic.co/start-local | sh` som en [separat lokal quick-start](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/local-development-installation-quickstart). Den opretter sin egen opsætning med Elasticsearch og Kibana og køres i en Unix-shell, eksempelvis Bash i WSL. Denne guide bruger repositoryets Compose-fil; du skal ikke køre quick-starten oveni. Se også [Kibana i Docker](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-kibana-with-docker).
+
+## Valgfrit: Integrér Elasticsearch i et lille Node.js-projekt
 
 Opret **`soeg.mjs` i repositoryets rodmappe**, ved siden af `compose.yaml`, og indsæt:
 
@@ -240,11 +314,10 @@ docker compose down
 Start igen med de eksisterende data:
 
 ```powershell
-docker compose up -d --wait --wait-timeout 180
-node soeg.mjs programmering
+docker compose up -d --wait --wait-timeout 300
 ```
 
-Du behøver ikke gentage trin 4 og 5. Undlad at tilføje `--volumes` til stopkommandoen, hvis du vil beholde demoens data.
+Åbn Kibana igen, og kør en søgning i Dev Tools. Du behøver ikke gentage trin 4 og 5. Undlad at tilføje `--volumes` til stopkommandoen, hvis du vil beholde demoens data.
 
 ## Forslag til selve fremlæggelsen
 
@@ -253,8 +326,8 @@ Gennemfør hele guiden inden fremlæggelsen, så imaget er downloadet, og data e
 1. Vis `compose.yaml`, og forklar version, én node, lokal port og lagring.
 2. Kør opstartskommandoen, og vis `docker compose ps`.
 3. Vis svaret fra `http://localhost:9200` for at bekræfte forbindelsen.
-4. Vis `soeg.mjs`, og kør de to søgninger.
-5. Forklar, at programmet kommunikerer med Elasticsearch via HTTP og JSON.
+4. Åbn Kibanas Dev Tools Console, og kør de to søgninger.
+5. Forklar forskellen på Elasticsearch som søgemotor og Kibana som browserinterface. Vis eventuelt det valgfrie Node.js-eksempel for at demonstrere integration med et program.
 
 ## Hvis noget driller
 
@@ -270,12 +343,14 @@ Gennemfør hele guiden inden fremlæggelsen, så imaget er downloadet, og data e
 | `fetch failed` | Kontrollér `docker compose ps`, og prøv forbindelseskontrollen i trin 3. |
 | `fetch is not defined` | Kontrollér Node-versionen, og installér version 22 eller nyere. |
 | Søgningen giver ingen resultater | Gentag trin 5, og prøv de præcise søgeord `programmering` og `kontoret`. |
+| Kibana svarer ikke, eller viser at serveren ikke er klar | Kontrollér `docker compose ps`, og se `docker compose logs --tail 100 kibana`. Første opstart kan tage flere minutter. |
+| Discover viser ingen produkter | Vælg data view `produkter` uden tidsfelt, og fjern eventuelle filtre. |
 
 Hvis loggen specifikt klager over for lav `vm.max_map_count`, kan du på Windows med Docker Desktop og WSL 2 køre:
 
 ```powershell
 wsl -d docker-desktop -u root -- sysctl -w vm.max_map_count=1048576
-docker compose up -d --wait --wait-timeout 180
+docker compose up -d --wait --wait-timeout 300
 ```
 
 Indstillingen gælder Docker Desktops Linux-miljø og kan skulle sættes igen efter genstart. Se [Elastics vejledning om Docker-systemkrav](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-prod).
