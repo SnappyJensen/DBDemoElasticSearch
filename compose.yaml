@@ -18,5 +18,23 @@ services:
       retries: 12
       start_period: 30s
 
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.6
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      SERVER_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:5601:5601"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+
 volumes:
   esdata:
