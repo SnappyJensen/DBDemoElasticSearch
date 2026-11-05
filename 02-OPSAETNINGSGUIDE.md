@@ -28,6 +28,38 @@ docker compose version
 
 ## 2. Opret konfigurationen
 
+### Lokale adgangskoder
+
+Kibanas Elasticsearch-hjemmeside forventer brugerroller. Derfor bruger denne opsætning login i stedet for den tidligere demo uden login. De eksisterende produktdata kan genbruges.
+
+Opret `.env` én gang fra PowerShell i repositoryets mappe. Blokken genbruger filen, hvis den allerede findes:
+
+```powershell
+if (Test-Path -LiteralPath '.env') {
+    Write-Output '.env findes allerede og bliver bevaret.'
+} else {
+    $names = @(
+        'ELASTIC_PASSWORD',
+        'KIBANA_SYSTEM_PASSWORD',
+        'KIBANA_SECURITY_ENCRYPTION_KEY',
+        'KIBANA_SAVED_OBJECTS_ENCRYPTION_KEY',
+        'KIBANA_REPORTING_ENCRYPTION_KEY'
+    )
+    $lines = foreach ($name in $names) {
+        $bytes = New-Object byte[] 16
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+        $value = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+        '{0}={1}' -f $name, $value
+    }
+    [System.IO.File]::WriteAllLines((Join-Path (Get-Location) '.env'), [string[]]$lines)
+}
+```
+
+`.env` er ignoreret af Git. Del og commit aldrig filen. `.env.example` dokumenterer blot variabelnavnene. Behold de genererede værdier; ændringer i `ELASTIC_PASSWORD` alene ændrer ikke adgangskoden i en allerede initialiseret database.
+
+### Docker Compose
+
 Filen **`compose.yaml` i repositoryets rodmappe** indeholder følgende. Hvis du følger guiden i et nyt, tomt projekt, kan du selv oprette filen med dette indhold:
 
 ```yaml
@@ -38,26 +70,55 @@ services:
       discovery.type: single-node
       cluster.name: eksamensdemo
       node.name: es-demo
-      xpack.security.enabled: "false"
+      xpack.security.enabled: "true"
+      xpack.security.autoconfiguration.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?Create .env using the setup guide first}
     ports:
       - "127.0.0.1:9200:9200"
     mem_limit: 1g
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200 > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS --user \"elastic:$${ELASTIC_PASSWORD}\" http://localhost:9200 > /dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
+
+  setup-kibana:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?Create .env using the setup guide first}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:?Create .env using the setup guide first}
+    entrypoint: ["/bin/bash", "-euc"]
+    command:
+      - |
+        curl --fail --silent --show-error \
+          --user "elastic:$${ELASTIC_PASSWORD}" \
+          --header 'Content-Type: application/json' \
+          --request POST \
+          --data "{\"password\":\"$${KIBANA_SYSTEM_PASSWORD}\"}" \
+          http://elasticsearch:9200/_security/user/kibana_system/_password
+    mem_limit: 256m
 
   kibana:
     image: docker.elastic.co/kibana/kibana:9.5.6
     depends_on:
       elasticsearch:
         condition: service_healthy
+      setup-kibana:
+        condition: service_completed_successfully
     environment:
       ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_SYSTEM_PASSWORD:?Create .env using the setup guide first}
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_SECURITY_ENCRYPTION_KEY:?Create .env using the setup guide first}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_SAVED_OBJECTS_ENCRYPTION_KEY:?Create .env using the setup guide first}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KIBANA_REPORTING_ENCRYPTION_KEY:?Create .env using the setup guide first}
       SERVER_HOST: "0.0.0.0"
     ports:
       - "127.0.0.1:5601:5601"
@@ -82,13 +143,15 @@ De vigtigste valg:
 | `image` | En fast version, så gruppen bruger samme udgave. |
 | `discovery.type: single-node` | Ét Elasticsearch-medlem, kaldet en node, til demoen. |
 | `127.0.0.1:9200:9200` | REST API'et er tilgængeligt på din egen computer på port 9200. |
-| `xpack.security.enabled: "false"` | Lokal demo over HTTP uden login. Denne konfiguration er kun til lokal udvikling og fremlæggelse. |
+| `xpack.security.enabled: "true"` | Aktiverer login og brugerroller, som Elasticsearch-hjemmesiden i Kibana forventer. |
 | `mem_limit` | Begrænser containerens hukommelse til 1 GB. |
 | `esdata` | Gemmer data i en Docker-volume, så de bevares, når containeren fjernes. |
 | `healthcheck` | Kontrollerer, at Elasticsearch svarer, før opstarten meldes klar. |
 | `kibana` | Browserinterfacet på port 5601. Bruger samme version som Elasticsearch. |
 | `ELASTICSEARCH_HOSTS` | Kibana kontakter Elasticsearch via servicenavnet på Dockers interne netværk. |
 | `depends_on` | Kibana starter, når Elasticsearch har bestået sit sundhedstjek. |
+| `setup-kibana` | Engangsopgave, der sætter adgangskoden for Kibanas servicekonto, inden Kibana starter. |
+| `XPACK_*_ENCRYPTIONKEY` | Faste lokale nøgler, som Kibana bruger til blandt andet sessioner og gemte objekter. |
 
 Elasticsearch kan konfigureres gennem miljøvariabler i containeren; se [Elastics konfigurationsvejledning](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-configure).
 
@@ -115,7 +178,11 @@ Kontrollér også forbindelsen fra PowerShell:
 
 ```powershell
 $esUrl = 'http://localhost:9200'
-Invoke-RestMethod -Uri $esUrl | ConvertTo-Json -Depth 5
+$credential = Get-Credential -UserName 'elastic' -Message 'Brug ELASTIC_PASSWORD fra din lokale .env-fil'
+$auth = '{0}:{1}' -f $credential.UserName, $credential.GetNetworkCredential().Password
+$basicAuth = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($auth))
+$headers = @{ Authorization = "Basic $basicAuth" }
+Invoke-RestMethod -Uri $esUrl -Headers $headers | ConvertTo-Json -Depth 5
 ```
 
 Svaret skal blandt andet indeholde:
@@ -130,7 +197,7 @@ Svaret skal blandt andet indeholde:
 }
 ```
 
-Der er flere felter i det rigtige svar. Du kan også åbne [localhost:9200](http://localhost:9200) i browseren for at se det.
+Der er flere felter i det rigtige svar. Du kan også åbne [localhost:9200](http://localhost:9200) i browseren; browseren vil bede om samme brugernavn og adgangskode. HTTP uden TLS bruges kun til denne lokale demo, og portene er bundet til din egen computer. Se [Elastics minimale sikkerhedsopsætning](https://www.elastic.co/docs/deploy-manage/security/set-up-minimal-security).
 
 ## 4. Opret et indeks til demoen
 
@@ -155,7 +222,7 @@ $indexBody = @'
 }
 '@
 
-Invoke-RestMethod -Method Put -Uri "$esUrl/produkter" -ContentType 'application/json; charset=utf-8' -Body $indexBody
+Invoke-RestMethod -Method Put -Uri "$esUrl/produkter" -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $indexBody
 ```
 
 **Kontrolpunkt:** Svaret viser `acknowledged: true`.
@@ -183,7 +250,7 @@ foreach ($produkt in $produkter) {
     } | ConvertTo-Json
 
     $uri = "$esUrl/produkter/_doc/$($produkt.id)?refresh=wait_for"
-    Invoke-RestMethod -Method Put -Uri $uri -ContentType 'application/json; charset=utf-8' -Body $body
+    Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $body
 }
 ```
 
@@ -195,7 +262,7 @@ foreach ($produkt in $produkter) {
 
 Åbn [Kibana](http://localhost:5601) eller gå direkte til [Dev Tools Console](http://localhost:5601/app/dev_tools#/console).
 
-Det er dit lokale Elastic-interface. Du behøver ikke oprette en Elastic Cloud-konto eller en prøveperiode. Port 9200 er Elasticsearchs API; port 5601 er Kibanas brugerflade. De eksisterende produkter bliver liggende i det samme indeks.
+Det er dit lokale Elastic-interface. Log ind med brugernavnet **`elastic`** og værdien af **`ELASTIC_PASSWORD`** fra din lokale `.env`-fil. Du behøver ikke en Elastic Cloud-konto eller en prøveperiode. Brugeren `kibana_system` bruges kun af Kibana i baggrunden og skal ikke bruges til browserlogin. Port 9200 er Elasticsearchs API; port 5601 er Kibanas brugerflade. De eksisterende produkter bliver liggende i det samme indeks.
 
 Hvis en velkomstside vises, vælg at udforske egne data, eksempelvis **Explore on my own**. Find derefter **Dev Tools** via menuen eller søgefeltet øverst, og vælg **Console**. Se [Elastics Console-vejledning](https://www.elastic.co/docs/explore-analyze/query-filter/tools/console).
 
@@ -254,7 +321,10 @@ const soegeord = process.argv.slice(2).join(' ') || 'programmering';
 try {
   const response = await fetch('http://localhost:9200/produkter/_search', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Basic ${Buffer.from(`elastic:${process.env.ELASTIC_PASSWORD}`).toString('base64')}`,
+    },
     body: JSON.stringify({
       query: {
         multi_match: {
@@ -283,12 +353,12 @@ try {
 }
 ```
 
-Programmet bruger Node.js' indbyggede `fetch`, så du behøver ikke installere npm-pakker. Det sender en HTTP-forespørgsel til Elasticsearch og søger i både navn og beskrivelse.
+Programmet bruger Node.js' indbyggede `fetch`, så du behøver ikke installere npm-pakker. Det sender en HTTP-forespørgsel til Elasticsearch og søger i både navn og beskrivelse. `--env-file=.env` indlæser den lokale adgangskode som en miljøvariabel; adgangskoden skrives ikke i programkoden.
 
 Kør:
 
 ```powershell
-node soeg.mjs programmering
+node --env-file=.env soeg.mjs programmering
 ```
 
 **Forventet resultat:** To produkter, `Studiecomputer` og `Gamingcomputer`. Rækkefølgen kan variere.
@@ -296,7 +366,7 @@ node soeg.mjs programmering
 Prøv derefter:
 
 ```powershell
-node soeg.mjs kontoret
+node --env-file=.env soeg.mjs kontoret
 ```
 
 **Forventet resultat:** Ét produkt, `Kontorstol`.
@@ -345,6 +415,8 @@ Gennemfør hele guiden inden fremlæggelsen, så imaget er downloadet, og data e
 | Søgningen giver ingen resultater | Gentag trin 5, og prøv de præcise søgeord `programmering` og `kontoret`. |
 | Kibana svarer ikke, eller viser at serveren ikke er klar | Kontrollér `docker compose ps`, og se `docker compose logs --tail 100 kibana`. Første opstart kan tage flere minutter. |
 | Discover viser ingen produkter | Vælg data view `produkter` uden tidsfelt, og fjern eventuelle filtre. |
+| `401 Unauthorized` fra port 9200 | Brug `elastic` og `ELASTIC_PASSWORD` fra `.env`. PowerShell-kommandoerne kræver `$headers` fra trin 3. |
+| Elasticsearch-hjemmesiden i Kibana viser `Unable to load page` og en fejl om `roles` eller `includes` | Kontrollér, at sikkerhed er slået til i Compose-filen, genstart tjenesterne, og log ind. Den tidligere opsætning uden login kunne udløse denne fejl i hjemmesiden. |
 
 Hvis loggen specifikt klager over for lav `vm.max_map_count`, kan du på Windows med Docker Desktop og WSL 2 køre:
 
